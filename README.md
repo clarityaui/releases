@@ -7,6 +7,7 @@ application source.
 ## Security model
 
 - `main` is protected. Release workflow changes must arrive through a pull request.
+- Pull requests must pass the `Release policy` controller self-test.
 - A candidate names one full, immutable source commit SHA and one matching version tag.
 - The private source is downloaded with a read-only token in a step that runs before any
   source-controlled command. The credential is not passed to install, test, or build steps.
