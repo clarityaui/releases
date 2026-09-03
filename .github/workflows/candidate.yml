@@ -117,6 +117,16 @@ jobs:
       - name: Install locked dependencies
         working-directory: source
         run: npm ci
+      - name: Build the WASM parity prerequisite
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target add wasm32-wasip1
+          npm run build:atlas
+          export RUSTFLAGS="--remap-path-prefix=$HOME=/build --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+          cargo build --release --target wasm32-wasip1 --manifest-path packages/atlas-core/native/cluster/Cargo.toml
+          cp packages/atlas-core/native/cluster/target/wasm32-wasip1/release/cluster.wasm packages/atlas-core/dist/cluster.wasm
       - name: Full guard suite
         working-directory: source
         env:
