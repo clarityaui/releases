@@ -182,8 +182,6 @@ jobs:
         working-directory: source
         env:
           ELECTRON_DISABLE_SANDBOX: '1'
-          PACKAGED_SMOKE_EMAIL: ${{ secrets.PACKAGED_SMOKE_EMAIL }}
-          PACKAGED_SMOKE_PASSWORD: ${{ secrets.PACKAGED_SMOKE_PASSWORD }}
         run: ${{ matrix.label == 'linux' && 'xvfb-run -a npm run test:packagedverify' || 'npm run test:packagedverify' }}
       - name: Verify Windows signature
         if: inputs.channel == 'public-beta' && matrix.label == 'windows'
@@ -217,7 +215,10 @@ jobs:
           RELEASE_PLATFORM: ${{ matrix.label }}
           RELEASE_SHA: ${{ inputs.source_sha }}
         run: |
-          $assets = Get-ChildItem dist -File | Where-Object { $_.Extension -in '.exe','.dmg','.zip','.AppImage','.deb','.blockmap','.yml' }
+          $assets = Get-ChildItem dist -File | Where-Object {
+            $_.Extension -in '.exe','.dmg','.zip','.AppImage','.deb','.blockmap' -or
+            ($_.Extension -eq '.yml' -and $_.Name -like 'latest*.yml')
+          }
           if (-not $assets) { throw 'No release assets were generated' }
           $assets | ForEach-Object { "$(Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName | Select-Object -ExpandProperty Hash)  $($_.Name)" } |
             Set-Content -Encoding ascii "dist/SHA256SUMS-$env:RELEASE_PLATFORM.txt"
