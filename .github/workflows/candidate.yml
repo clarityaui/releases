@@ -217,7 +217,10 @@ jobs:
           RELEASE_PLATFORM: ${{ matrix.label }}
           RELEASE_SHA: ${{ inputs.source_sha }}
         run: |
-          $assets = Get-ChildItem dist -File | Where-Object { $_.Extension -in '.exe','.dmg','.zip','.AppImage','.deb','.blockmap','.yml' }
+          $assets = Get-ChildItem dist -File | Where-Object {
+            $_.Extension -in '.exe','.dmg','.zip','.AppImage','.deb','.blockmap' -or
+            ($_.Extension -eq '.yml' -and $_.Name -like 'latest*.yml')
+          }
           if (-not $assets) { throw 'No release assets were generated' }
           $assets | ForEach-Object { "$(Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName | Select-Object -ExpandProperty Hash)  $($_.Name)" } |
             Set-Content -Encoding ascii "dist/SHA256SUMS-$env:RELEASE_PLATFORM.txt"
