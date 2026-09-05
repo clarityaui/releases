@@ -182,6 +182,8 @@ jobs:
         working-directory: source
         env:
           ELECTRON_DISABLE_SANDBOX: '1'
+          PACKAGED_SMOKE_EMAIL: ${{ secrets.PACKAGED_SMOKE_EMAIL }}
+          PACKAGED_SMOKE_PASSWORD: ${{ secrets.PACKAGED_SMOKE_PASSWORD }}
         run: ${{ matrix.label == 'linux' && 'xvfb-run -a npm run test:packagedverify' || 'npm run test:packagedverify' }}
       - name: Verify Windows signature
         if: inputs.channel == 'public-beta' && matrix.label == 'windows'
