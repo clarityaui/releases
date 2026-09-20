@@ -68,18 +68,37 @@ jobs:
     name: ${{ inputs.channel }} / ${{ matrix.label }}
     needs: authorize
     strategy:
-      fail-fast: true
+      # Six legs since 2026-09-19 (the beta scope: Windows x64 + arm64, macOS Apple silicon + Intel, Linux
+      # x64 + arm64). fail-fast is OFF on purpose: every attempt bills the two macOS legs at 10x whether the
+      # Windows leg finished or not, so one failing leg cancelling the other five turns each attempt into a
+      # single-leg diagnosis. The draft job still needs every leg, so nothing is published from a partial set.
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
-            label: windows
-            target: win
+            label: windows-x64
+            family: windows
+            target: win --x64
+          - os: windows-11-arm
+            label: windows-arm64
+            family: windows
+            target: win --arm64
           - os: macos-latest
-            label: macos
-            target: mac
+            label: macos-arm64
+            family: macos
+            target: mac --arm64
+          - os: macos-15-intel
+            label: macos-x64
+            family: macos
+            target: mac --x64
           - os: ubuntu-latest
-            label: linux
-            target: linux
+            label: linux-x64
+            family: linux
+            target: linux --x64
+          - os: ubuntu-24.04-arm
+            label: linux-arm64
+            family: linux
+            target: linux --arm64
     runs-on: ${{ matrix.os }}
     environment: ${{ inputs.channel == 'public-beta' && 'beta-signing' || 'source-read' }}
     timeout-minutes: 90
@@ -128,7 +147,7 @@ jobs:
           cargo build --release --target wasm32-wasip1 --manifest-path packages/atlas-core/native/cluster/Cargo.toml
           cp packages/atlas-core/native/cluster/target/wasm32-wasip1/release/cluster.wasm packages/atlas-core/dist/cluster.wasm
       - name: Windows HUD diagnostic preflight
-        if: matrix.label == 'windows'
+        if: matrix.family == 'windows'
         working-directory: source
         env:
           ELECTRON_DISABLE_SANDBOX: '1'
@@ -137,7 +156,7 @@ jobs:
         working-directory: source
         env:
           ELECTRON_DISABLE_SANDBOX: '1'
-        run: ${{ matrix.label == 'linux' && 'xvfb-run -a npm test' || 'npm test' }}
+        run: ${{ matrix.family == 'linux' && 'xvfb-run -a npm test' || 'npm test' }}
       - name: Build application without publishing credentials
         working-directory: source
         run: npm run build
@@ -145,7 +164,7 @@ jobs:
         working-directory: source
         run: node scripts/release-auth-guard.mjs
       - name: Provision Apple notarization key
-        if: inputs.channel == 'public-beta' && matrix.label == 'macos'
+        if: inputs.channel == 'public-beta' && matrix.family == 'macos'
         shell: bash
         env:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
@@ -166,9 +185,9 @@ jobs:
         if: inputs.channel == 'public-beta'
         working-directory: source
         env:
-          CSC_LINK: ${{ matrix.label == 'windows' && secrets.WIN_CSC_LINK || matrix.label == 'macos' && secrets.MAC_CSC_LINK || '' }}
-          CSC_KEY_PASSWORD: ${{ matrix.label == 'windows' && secrets.WIN_CSC_KEY_PASSWORD || matrix.label == 'macos' && secrets.MAC_CSC_KEY_PASSWORD || '' }}
-          CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.label == 'linux' && 'false' || 'true' }}
+          CSC_LINK: ${{ matrix.family == 'windows' && secrets.WIN_CSC_LINK || matrix.family == 'macos' && secrets.MAC_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.family == 'windows' && secrets.WIN_CSC_KEY_PASSWORD || matrix.family == 'macos' && secrets.MAC_CSC_KEY_PASSWORD || '' }}
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.family == 'linux' && 'false' || 'true' }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: node scripts/electron-builder-safe.cjs --${{ matrix.target }} --publish never
@@ -184,9 +203,9 @@ jobs:
           ELECTRON_DISABLE_SANDBOX: '1'
           PACKAGED_SMOKE_EMAIL: ${{ secrets.PACKAGED_SMOKE_EMAIL }}
           PACKAGED_SMOKE_PASSWORD: ${{ secrets.PACKAGED_SMOKE_PASSWORD }}
-        run: ${{ matrix.label == 'linux' && 'xvfb-run -a npm run test:packagedverify' || 'npm run test:packagedverify' }}
+        run: ${{ matrix.family == 'linux' && 'xvfb-run -a npm run test:packagedverify' || 'npm run test:packagedverify' }}
       - name: Verify Windows signature
-        if: inputs.channel == 'public-beta' && matrix.label == 'windows'
+        if: inputs.channel == 'public-beta' && matrix.family == 'windows'
         working-directory: source
         shell: pwsh
         run: |
@@ -195,7 +214,7 @@ jobs:
           $signature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
           if ($signature.Status -ne 'Valid') { throw "Invalid Windows signature: $($signature.Status)" }
       - name: Verify macOS signature and notarization ticket
-        if: inputs.channel == 'public-beta' && matrix.label == 'macos'
+        if: inputs.channel == 'public-beta' && matrix.family == 'macos'
         working-directory: source
         shell: bash
         run: |
@@ -205,7 +224,7 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app_path"
           xcrun stapler validate "$app_path"
       - name: Installed upgrade smoke
-        if: inputs.channel == 'public-beta' && matrix.label == 'windows'
+        if: inputs.channel == 'public-beta' && matrix.family == 'windows'
         working-directory: source
         shell: pwsh
         run: ./scripts/upgrade-smoke.ps1 -CandidatePath (Get-ChildItem dist -Filter '*.exe' | Select-Object -First 1).FullName
@@ -215,6 +234,7 @@ jobs:
         env:
           RELEASE_CHANNEL: ${{ inputs.channel }}
           RELEASE_PLATFORM: ${{ matrix.label }}
+          RELEASE_FAMILY: ${{ matrix.family }}
           RELEASE_SHA: ${{ inputs.source_sha }}
         run: |
           $assets = Get-ChildItem dist -File | Where-Object {
@@ -224,7 +244,7 @@ jobs:
           if (-not $assets) { throw 'No release assets were generated' }
           $assets | ForEach-Object { "$(Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName | Select-Object -ExpandProperty Hash)  $($_.Name)" } |
             Set-Content -Encoding ascii "dist/SHA256SUMS-$env:RELEASE_PLATFORM.txt"
-          $signed = $env:RELEASE_CHANNEL -eq 'public-beta' -and $env:RELEASE_PLATFORM -in @('windows','macos')
+          $signed = $env:RELEASE_CHANNEL -eq 'public-beta' -and $env:RELEASE_FAMILY -in @('windows','macos')
           @{
             schema = 1
             platform = $env:RELEASE_PLATFORM
@@ -234,7 +254,7 @@ jobs:
             signed = $signed
           } | ConvertTo-Json | Set-Content -Encoding utf8 "dist/verification-$env:RELEASE_PLATFORM.json"
       - name: Remove temporary Apple key
-        if: always() && matrix.label == 'macos'
+        if: always() && matrix.family == 'macos'
         shell: bash
         run: rm -f "$RUNNER_TEMP/apple-api-key.p8"
       - name: Upload unprivileged candidate outputs

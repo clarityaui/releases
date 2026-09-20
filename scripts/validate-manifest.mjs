@@ -19,12 +19,16 @@ if (manifest.source?.repository !== 'clarityaui/main' || manifest.source?.sha !=
   throw new Error('manifest source identity does not match')
 }
 if (!Number.isFinite(Date.parse(manifest.generated_at))) throw new Error('invalid manifest timestamp')
-if (!Array.isArray(manifest.platforms) || manifest.platforms.length !== 3) throw new Error('manifest must contain exactly three platforms')
+if (!Array.isArray(manifest.platforms) || manifest.platforms.length !== 6) throw new Error('manifest must contain exactly six platforms')
 
+// Mirrors assemble-manifest.mjs's specs: a platform is a family AND an arch, and the file name carries the arch.
 const expected = new Map([
-  ['windows', { extension: '.exe', signed: channel === 'public-beta' }],
-  ['macos', { extension: '.dmg', signed: channel === 'public-beta' }],
-  ['linux', { extension: '.AppImage', signed: false }]
+  ['windows-x64', { family: 'windows', arch: 'x64', pattern: /-x64\.exe$/, signed: channel === 'public-beta' }],
+  ['windows-arm64', { family: 'windows', arch: 'arm64', pattern: /-arm64\.exe$/, signed: channel === 'public-beta' }],
+  ['macos-arm64', { family: 'macos', arch: 'arm64', pattern: /-arm64\.dmg$/, signed: channel === 'public-beta' }],
+  ['macos-x64', { family: 'macos', arch: 'x64', pattern: /-x64\.dmg$/, signed: channel === 'public-beta' }],
+  ['linux-x64', { family: 'linux', arch: 'x64', pattern: /-x86_64\.AppImage$/, signed: false }],
+  ['linux-arm64', { family: 'linux', arch: 'arm64', pattern: /-arm64\.AppImage$/, signed: false }]
 ])
 const seen = new Set()
 const releaseBase = `https://github.com/clarityaui/releases/releases/download/${encodeURIComponent(tag)}/`
@@ -33,9 +37,10 @@ for (const platform of manifest.platforms) {
   if (!spec || seen.has(platform.id)) throw new Error(`unexpected or duplicate platform: ${platform.id}`)
   seen.add(platform.id)
   if (typeof platform.file !== 'string' || basename(platform.file) !== platform.file ||
-      !/^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(platform.file) || !platform.file.endsWith(spec.extension)) {
+      !/^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(platform.file) || !spec.pattern.test(platform.file)) {
     throw new Error(`unsafe or invalid installer filename for ${platform.id}`)
   }
+  if (platform.family !== spec.family || platform.arch !== spec.arch) throw new Error(`family/arch claim does not match ${platform.id}`)
   if (platform.url !== `${releaseBase}${encodeURIComponent(platform.file)}`) throw new Error(`invalid release URL for ${platform.id}`)
   if (!/^[0-9a-f]{64}$/.test(platform.sha256 || '')) throw new Error(`invalid checksum for ${platform.id}`)
   if (platform.verified !== true || platform.signed !== spec.signed) throw new Error(`invalid verification claim for ${platform.id}`)
