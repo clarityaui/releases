@@ -237,6 +237,19 @@ jobs:
           RELEASE_FAMILY: ${{ matrix.family }}
           RELEASE_SHA: ${{ inputs.source_sha }}
         run: |
+          # ⚠⚠⚠ electron-builder names its update feed after the PLATFORM, never the arch: both Windows legs
+          #     write `latest.yml` and both macOS legs write `latest-mac.yml`. The draft job downloads all six
+          #     legs with `merge-multiple: true` into ONE flat directory, so the second mac feed overwrote the
+          #     first and the release would have shipped a feed describing a single architecture. Rename to a
+          #     per-leg name HERE, before the checksums are taken, so nothing can overwrite anything and
+          #     assemble-manifest's name/hash collision check stays strict. The draft job puts the canonical
+          #     names back by merging (scripts/merge-update-feeds.mjs) — including for Linux, which would
+          #     otherwise be published under a name no AppImage client looks for.
+          $feeds = @(Get-ChildItem dist -File -Filter 'latest*.yml')
+          if ($feeds.Count -ne 1) { throw "expected exactly one update feed in dist, found $($feeds.Count)" }
+          if ($feeds[0].Name -ne "latest-$env:RELEASE_PLATFORM.yml") {
+            Move-Item -LiteralPath $feeds[0].FullName -Destination (Join-Path dist "latest-$env:RELEASE_PLATFORM.yml")
+          }
           $assets = Get-ChildItem dist -File | Where-Object {
             $_.Extension -in '.exe','.dmg','.zip','.AppImage','.deb','.blockmap' -or
             ($_.Extension -eq '.yml' -and $_.Name -like 'latest*.yml')
@@ -296,6 +309,8 @@ jobs:
           pattern: candidate-*
           path: staged
           merge-multiple: true
+      - name: Rebuild the canonical update feeds from the per-leg ones
+        run: node scripts/merge-update-feeds.mjs staged
       - name: Assemble and independently validate manifest
         run: |
           node scripts/assemble-manifest.mjs staged "${{ inputs.tag }}" "${{ inputs.source_sha }}" "${{ inputs.channel }}" staged/release-manifest.json
