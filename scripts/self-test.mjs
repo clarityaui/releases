@@ -90,4 +90,50 @@ for (const channel of ['internal-unsigned', 'public-beta']) {
   }
 }
 
-console.log('PASS: controller workflow boundary and manifest tamper rejection verified')
+/**
+ * ⚠⚠⚠ THE MAC FEED MUST NAME BOTH ARCHITECTURES. Both macOS legs write `latest-mac.yml` and the draft job
+ *     downloads every leg into one flat directory, so before the per-leg rename one mac feed silently overwrote
+ *     the other and the release would have carried an update feed for a single architecture — the half of the
+ *     Mac users on the other one would never see an update. The first all-six-green candidate (2026-09-21) was
+ *     stopped by the name/hash collision rather than shipping that, which is the only reason it was noticed.
+ *     These two cases pin the merge and, more importantly, pin its REFUSAL.
+ */
+const feed = (url) => `version: 1.2.3\nfiles:\n  - url: ${url}\n    sha512: deadbeef\n    size: 42\npath: ${url}\nsha512: deadbeef\nreleaseDate: '2026-09-21T00:00:00.000Z'\n`
+const legFeeds = {
+  'windows-x64': 'clarity-aui-1.2.3-x64.exe',
+  'windows-arm64': 'clarity-aui-1.2.3-arm64.exe',
+  'macos-arm64': 'clarity-aui-1.2.3-arm64.dmg',
+  'macos-x64': 'clarity-aui-1.2.3-x64.dmg',
+  'linux-x64': 'clarity-aui-1.2.3-x86_64.AppImage',
+  'linux-arm64': 'clarity-aui-1.2.3-arm64.AppImage'
+}
+const mergeIn = (directory) =>
+  spawnSync(process.execPath, [join(root, 'scripts', 'merge-update-feeds.mjs'), directory], { encoding: 'utf8' })
+
+const feeds = mkdtempSync(join(tmpdir(), 'clarity-release-feeds-'))
+try {
+  for (const [leg, url] of Object.entries(legFeeds)) writeFileSync(join(feeds, `latest-${leg}.yml`), feed(url))
+  assert(mergeIn(feeds).status === 0, 'the six per-leg feeds must merge')
+  const mac = readFileSync(join(feeds, 'latest-mac.yml'), 'utf8')
+  assert(mac.includes('-arm64.dmg') && mac.includes('-x64.dmg'), 'the merged mac feed must name BOTH architectures')
+  const windows = readFileSync(join(feeds, 'latest.yml'), 'utf8')
+  assert(windows.includes('-x64.exe') && windows.includes('-arm64.exe'), 'the merged windows feed must name BOTH architectures')
+  // The rename would strand Linux under a name no AppImage client asks for, so the canonical pair must exist.
+  readFileSync(join(feeds, 'latest-linux.yml'), 'utf8')
+  readFileSync(join(feeds, 'latest-linux-arm64.yml'), 'utf8')
+} finally {
+  rmSync(feeds, { recursive: true, force: true })
+}
+
+const halfFeed = mkdtempSync(join(tmpdir(), 'clarity-release-halffeed-'))
+try {
+  // Both mac legs present, but the x64 leg carries the arm64 build — the shape a silent overwrite produces.
+  for (const [leg, url] of Object.entries(legFeeds)) {
+    writeFileSync(join(halfFeed, `latest-${leg}.yml`), feed(leg === 'macos-x64' ? legFeeds['macos-arm64'] : url))
+  }
+  assert(mergeIn(halfFeed).status !== 0, 'a mac feed that lost an architecture was accepted')
+} finally {
+  rmSync(halfFeed, { recursive: true, force: true })
+}
+
+console.log('PASS: controller workflow boundary, manifest tamper rejection and update-feed arch coverage verified')
