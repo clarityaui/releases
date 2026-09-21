@@ -48,3 +48,24 @@ Repository variables:
 
 Until platform signing identities exist, use only `internal-unsigned` and keep distribution
 limited to informed testers.
+
+## Legs
+
+A candidate is six installers, one per leg of the build matrix, and the draft is created only
+when all six verified:
+
+| id | runner | target | installer |
+| --- | --- | --- | --- |
+| `windows-x64` | `windows-latest` | `--win --x64` | `clarity-aui-<v>-x64.exe` |
+| `windows-arm64` | `windows-11-arm` | `--win --arm64` | `clarity-aui-<v>-arm64.exe` |
+| `macos-arm64` | `macos-latest` | `--mac --arm64` | `clarity-aui-<v>-arm64.dmg` |
+| `macos-x64` | `macos-15-intel` | `--mac --x64` | `clarity-aui-<v>-x64.dmg` |
+| `linux-x64` | `ubuntu-latest` | `--linux --x64` | `clarity-aui-<v>-x86_64.AppImage` |
+| `linux-arm64` | `ubuntu-24.04-arm` | `--linux --arm64` | `clarity-aui-<v>-arm64.AppImage` |
+
+The manifest names each platform by `id`, and carries `family` and `arch` beside it; the
+installer's file name carries the arch electron-builder wrote, and the manifest scripts match
+on that rather than on the extension, because two legs share every extension. `public-beta`
+requires every Windows and macOS leg to be signed; Linux legs are never signed. The two macOS
+legs bill at the macOS rate, so the matrix does not fail fast: one red leg does not cancel the
+other five and cost a second attempt to learn what they would have said.

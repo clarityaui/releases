@@ -79,7 +79,7 @@ jobs:
         run: |
           node - <<'NODE'
           const manifest = require('./candidate/release-manifest.json')
-          for (const id of ['windows', 'macos']) {
+          for (const id of ['windows-x64', 'windows-arm64', 'macos-arm64', 'macos-x64']) {
             const platform = manifest.platforms.find((item) => item.id === id)
             if (!platform || platform.signed !== true || platform.verified !== true) {
               throw new Error(`${id} is not recorded as signed and verified`)
