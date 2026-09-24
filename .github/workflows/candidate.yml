@@ -12,12 +12,13 @@ on:
         required: true
         type: string
       channel:
-        description: Unsigned internal testing or fully signed public beta
+        description: Unsigned internal testing, a beta signed on macOS only, or a fully signed public beta
         required: true
         default: internal-unsigned
         type: choice
         options:
           - internal-unsigned
+          - mac-signed-beta
           - public-beta
       acknowledgement:
         description: Type BUILD followed by a space and the tag
@@ -42,7 +43,7 @@ jobs:
   authorize:
     name: Validate immutable source
     runs-on: ubuntu-latest
-    environment: ${{ inputs.channel == 'public-beta' && 'beta-signing' || 'source-read' }}
+    environment: ${{ inputs.channel != 'internal-unsigned' && 'beta-signing' || 'source-read' }}
     timeout-minutes: 10
     steps:
       - name: Validate request and source ancestry
@@ -100,7 +101,7 @@ jobs:
             family: linux
             target: linux --arm64
     runs-on: ${{ matrix.os }}
-    environment: ${{ inputs.channel == 'public-beta' && 'beta-signing' || 'source-read' }}
+    environment: ${{ inputs.channel != 'internal-unsigned' && 'beta-signing' || 'source-read' }}
     timeout-minutes: 90
     steps:
       - name: Download the exact private source without persisting credentials
@@ -164,7 +165,7 @@ jobs:
         working-directory: source
         run: node scripts/release-auth-guard.mjs
       - name: Provision Apple notarization key
-        if: inputs.channel == 'public-beta' && matrix.family == 'macos'
+        if: inputs.channel != 'internal-unsigned' && matrix.family == 'macos'
         shell: bash
         env:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
@@ -175,14 +176,14 @@ jobs:
           printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$key_path"
           chmod 600 "$key_path"
           echo "APPLE_API_KEY=$key_path" >> "$GITHUB_ENV"
-      - name: Package internal unsigned candidate
-        if: inputs.channel == 'internal-unsigned'
+      - name: Package unsigned candidate
+        if: inputs.channel == 'internal-unsigned' || (inputs.channel == 'mac-signed-beta' && matrix.family != 'macos')
         working-directory: source
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: node scripts/electron-builder-safe.cjs --${{ matrix.target }} --publish never
-      - name: Package signed public candidate
-        if: inputs.channel == 'public-beta'
+      - name: Package signed candidate
+        if: inputs.channel == 'public-beta' || (inputs.channel == 'mac-signed-beta' && matrix.family == 'macos')
         working-directory: source
         env:
           CSC_LINK: ${{ matrix.family == 'windows' && secrets.WIN_CSC_LINK || matrix.family == 'macos' && secrets.MAC_CSC_LINK || '' }}
@@ -214,7 +215,7 @@ jobs:
           $signature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
           if ($signature.Status -ne 'Valid') { throw "Invalid Windows signature: $($signature.Status)" }
       - name: Verify macOS signature and notarization ticket
-        if: inputs.channel == 'public-beta' && matrix.family == 'macos'
+        if: inputs.channel != 'internal-unsigned' && matrix.family == 'macos'
         working-directory: source
         shell: bash
         run: |
@@ -257,7 +258,8 @@ jobs:
           if (-not $assets) { throw 'No release assets were generated' }
           $assets | ForEach-Object { "$(Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName | Select-Object -ExpandProperty Hash)  $($_.Name)" } |
             Set-Content -Encoding ascii "dist/SHA256SUMS-$env:RELEASE_PLATFORM.txt"
-          $signed = $env:RELEASE_CHANNEL -eq 'public-beta' -and $env:RELEASE_FAMILY -in @('windows','macos')
+          # The same rule as scripts/channels.mjs — the self-test holds the two together.
+          $signed = ($env:RELEASE_CHANNEL -eq 'public-beta' -and $env:RELEASE_FAMILY -in @('windows','macos')) -or ($env:RELEASE_CHANNEL -eq 'mac-signed-beta' -and $env:RELEASE_FAMILY -eq 'macos')
           @{
             schema = 1
             platform = $env:RELEASE_PLATFORM
@@ -328,6 +330,8 @@ jobs:
           warning=''
           if [ "${{ inputs.channel }}" = internal-unsigned ]; then
             warning=$'\n\nWARNING: Internal unsigned candidate. Windows SmartScreen and macOS Gatekeeper trust are not established. Do not redistribute.'
+          elif [ "${{ inputs.channel }}" = mac-signed-beta ]; then
+            warning=$'\n\nNOTE: macOS builds are signed and notarized. Windows builds are not signed yet, so SmartScreen asks before the first run.'
           fi
           notes="$(printf 'Source: clarityaui/main@%s\nChannel: %s\nController run: %s%s' '${{ inputs.source_sha }}' '${{ inputs.channel }}' '${{ github.run_id }}' "$warning")"
           mapfile -d '' assets < <(find staged -maxdepth 1 -type f -print0 | sort -z)

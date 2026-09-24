@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto'
 import { basename, join, resolve } from 'node:path'
 import { readFileSync } from 'node:fs'
+import { isChannel, signedFor } from './channels.mjs'
 
 const [manifestArg, directoryArg, tag, sourceShaArg, channel] = process.argv.slice(2)
 const sourceSha = (sourceShaArg || '').toLowerCase()
 if (!manifestArg || !directoryArg || !/^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(tag || '') ||
-    !/^[0-9a-f]{40}$/.test(sourceSha) || !['internal-unsigned', 'public-beta'].includes(channel)) {
+    !/^[0-9a-f]{40}$/.test(sourceSha) || !isChannel(channel)) {
   console.error('usage: node scripts/validate-manifest.mjs <manifest> <asset-dir> <vX.Y.Z> <source-sha> <channel>')
   process.exit(2)
 }
@@ -23,12 +24,12 @@ if (!Array.isArray(manifest.platforms) || manifest.platforms.length !== 6) throw
 
 // Mirrors assemble-manifest.mjs's specs: a platform is a family AND an arch, and the file name carries the arch.
 const expected = new Map([
-  ['windows-x64', { family: 'windows', arch: 'x64', pattern: /-x64\.exe$/, signed: channel === 'public-beta' }],
-  ['windows-arm64', { family: 'windows', arch: 'arm64', pattern: /-arm64\.exe$/, signed: channel === 'public-beta' }],
-  ['macos-arm64', { family: 'macos', arch: 'arm64', pattern: /-arm64\.dmg$/, signed: channel === 'public-beta' }],
-  ['macos-x64', { family: 'macos', arch: 'x64', pattern: /-x64\.dmg$/, signed: channel === 'public-beta' }],
-  ['linux-x64', { family: 'linux', arch: 'x64', pattern: /-x86_64\.AppImage$/, signed: false }],
-  ['linux-arm64', { family: 'linux', arch: 'arm64', pattern: /-arm64\.AppImage$/, signed: false }]
+  ['windows-x64', { family: 'windows', arch: 'x64', pattern: /-x64\.exe$/, signed: signedFor(channel, 'windows') }],
+  ['windows-arm64', { family: 'windows', arch: 'arm64', pattern: /-arm64\.exe$/, signed: signedFor(channel, 'windows') }],
+  ['macos-arm64', { family: 'macos', arch: 'arm64', pattern: /-arm64\.dmg$/, signed: signedFor(channel, 'macos') }],
+  ['macos-x64', { family: 'macos', arch: 'x64', pattern: /-x64\.dmg$/, signed: signedFor(channel, 'macos') }],
+  ['linux-x64', { family: 'linux', arch: 'x64', pattern: /-x86_64\.AppImage$/, signed: signedFor(channel, 'linux') }],
+  ['linux-arm64', { family: 'linux', arch: 'arm64', pattern: /-arm64\.AppImage$/, signed: signedFor(channel, 'linux') }]
 ])
 const seen = new Set()
 const releaseBase = `https://github.com/clarityaui/releases/releases/download/${encodeURIComponent(tag)}/`

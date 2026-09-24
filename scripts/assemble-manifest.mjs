@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto'
 import { basename, join, resolve } from 'node:path'
 import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { isChannel, signedFor } from './channels.mjs'
 
 const [directoryArg, tag, sourceShaArg, channel, outputArg] = process.argv.slice(2)
 const sourceSha = (sourceShaArg || '').toLowerCase()
 if (!directoryArg || !/^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(tag || '') ||
-    !/^[0-9a-f]{40}$/.test(sourceSha) || !['internal-unsigned', 'public-beta'].includes(channel) || !outputArg) {
+    !/^[0-9a-f]{40}$/.test(sourceSha) || !isChannel(channel) || !outputArg) {
   console.error('usage: node scripts/assemble-manifest.mjs <asset-dir> <vX.Y.Z> <source-sha> <channel> <output>')
   process.exit(2)
 }
@@ -49,7 +50,7 @@ const platforms = specs.map((spec) => {
       verification.source_sha !== sourceSha || verification.verified !== true) {
     throw new Error(`invalid verification record for ${spec.id}`)
   }
-  const expectedSigned = channel === 'public-beta' && spec.family !== 'linux'
+  const expectedSigned = signedFor(channel, spec.family)
   if (verification.signed !== expectedSigned) throw new Error(`invalid signing claim for ${spec.id}`)
   const matches = names.filter((name) => spec.pattern.test(name))
   if (matches.length !== 1) throw new Error(`${spec.id} must have exactly one ${spec.extension} asset for ${spec.arch}; found ${matches.length}`)
@@ -58,9 +59,12 @@ const platforms = specs.map((spec) => {
   if (!sha256) throw new Error(`missing checksum for ${file}`)
   const actual = createHash('sha256').update(readFileSync(join(directory, file))).digest('hex')
   if (actual !== sha256) throw new Error(`checksum mismatch for ${file}`)
-  const meta = channel === 'public-beta'
-    ? (spec.family === 'windows' ? `${spec.arch} · signed exe` : spec.family === 'macos' ? `${spec.arch} · signed and notarized dmg` : `${spec.arch} · verified AppImage`)
-    : `${spec.arch} · internal unsigned build`
+  // Public-beta strings are unchanged; a mac-signed beta says which of its legs are signed and which are not.
+  const meta = channel === 'internal-unsigned'
+    ? `${spec.arch} · internal unsigned build`
+    : expectedSigned
+      ? (spec.family === 'windows' ? `${spec.arch} · signed exe` : `${spec.arch} · signed and notarized dmg`)
+      : spec.family === 'linux' ? `${spec.arch} · verified AppImage` : `${spec.arch} · unsigned ${spec.family === 'windows' ? 'exe' : 'dmg'}`
   return {
     id: spec.id,
     family: spec.family,
