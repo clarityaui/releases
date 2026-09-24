@@ -3,11 +3,16 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { CHANNELS, signedFor } from './channels.mjs'
 
 const root = resolve(new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
-const candidate = readFileSync(join(root, '.github', 'workflows', 'candidate.yml'), 'utf8')
-const promotion = readFileSync(join(root, '.github', 'workflows', 'promote.yml'), 'utf8')
-const checks = readFileSync(join(root, '.github', 'workflows', 'controller-checks.yml'), 'utf8')
+// ⚠ Read with LF line endings whatever the checkout. The readers below match `\n`, and a Windows clone
+//   (core.autocrlf=true, the default there) checks the workflows out with CRLF: the channel reader then found
+//   no options at all and failed a clean tree. CI's Linux checkout is LF, so only a local run could see it.
+const workflowText = (name) => readFileSync(join(root, '.github', 'workflows', name), 'utf8').replace(/\r\n/g, '\n')
+const candidate = workflowText('candidate.yml')
+const promotion = workflowText('promote.yml')
+const checks = workflowText('controller-checks.yml')
 
 function assert(condition, message) {
   if (!condition) throw new Error(message)
@@ -25,6 +30,56 @@ assert(/\n  draft:[\s\S]*contents: write/.test(candidate), 'only the isolated dr
 assert(/environment:.*public-beta/.test(promotion) && /PROMOTE \$\{\{ inputs\.tag \}\}/.test(promotion), 'promotion must use a protected environment and exact acknowledgement')
 assert(/Get-AuthenticodeSignature/.test(candidate) && /codesign --verify/.test(candidate) && /stapler validate/.test(candidate), 'public beta must verify both platform trust chains')
 
+// ONE channel list: both workflows offer exactly the channels scripts/channels.mjs defines, in any order.
+const channelOptions = (workflow) => {
+  const block = /\n      channel:\n[\s\S]*?options:\n((?:\s+- [a-z-]+\n)+)/.exec(workflow)
+  return block ? block[1].trim().split(/\n/).map((l) => l.replace(/^\s*-\s*/, '').trim()).sort() : []
+}
+const defined = Object.keys(CHANNELS).sort()
+assert(JSON.stringify(channelOptions(candidate)) === JSON.stringify(defined), `candidate channels ${channelOptions(candidate)} must equal ${defined}`)
+assert(JSON.stringify(channelOptions(promotion)) === JSON.stringify(defined), `promotion channels ${channelOptions(promotion)} must equal ${defined}`)
+/**
+ * ⚠⚠ THE SIGNING TRUTH IS STATED IN THREE PLACES, SO ALL THREE ARE EVALUATED — never matched as text. The table
+ *    (channels.mjs), the step that actually signs (its `if:` and the families its CSC_LINK has a secret for), and the
+ *    verification record's `$signed` claim. The first cut of this check read the claim's TEXT, and a negative control
+ *    that made the table sign nothing on mac-signed-beta stayed green: the fixtures below derive from the table too, so a
+ *    table drifting from the workflow agreed with itself. Evaluating the workflow closes that.
+ */
+const families = ['windows', 'macos', 'linux']
+const ghExpr = (expr, channel, family) =>
+  Function(`return (${expr.replace(/inputs\.channel/g, JSON.stringify(channel)).replace(/matrix\.family/g, JSON.stringify(family)).replace(/(!?)==/g, (_m, bang) => (bang ? '!==' : '==='))})`)()
+const stepIf = (name) => {
+  const m = new RegExp(`- name: ${name}\\n\\s+if: (.+)\\n`).exec(candidate)
+  assert(m, `the "${name}" step must exist with an if: condition`)
+  return m[1]
+}
+const signedIf = stepIf('Package signed candidate')
+const unsignedIf = stepIf('Package unsigned candidate')
+const cscFamilies = [...candidate.matchAll(/matrix\.family == '([a-z]+)' && secrets\.[A-Z_]*CSC_LINK/g)].map((m) => m[1])
+assert(cscFamilies.length > 0, 'the signed step names the families it has a certificate for')
+const claimLine = /\$signed = (.+)\n/.exec(candidate)
+assert(claimLine, 'the verification record states its signing claim')
+const claimJs = claimLine[1]
+  .replace(/\$env:RELEASE_CHANNEL -eq '([a-z-]+)'/g, (_m, v) => `(channel === '${v}')`)
+  .replace(/\$env:RELEASE_FAMILY -in @\(([^)]*)\)/g, (_m, list) => `[${list}].includes(family)`)
+  .replace(/\$env:RELEASE_FAMILY -eq '([a-z]+)'/g, (_m, v) => `(family === '${v}')`)
+  .replace(/ -and /g, ' && ')
+  .replace(/ -or /g, ' || ')
+const claims = Function('channel', 'family', `return (${claimJs})`)
+for (const channel of Object.keys(CHANNELS)) {
+  for (const family of families) {
+    const table = signedFor(channel, family)
+    const step = ghExpr(signedIf, channel, family) && cscFamilies.includes(family)
+    const claim = claims(channel, family) === true
+    assert(table === step && step === claim, `${channel}/${family}: the table says ${table}, the signing step ${step}, the record ${claim}`)
+    // …and every leg is packaged exactly once: by the signed step or by the unsigned one, never both, never neither.
+    assert(ghExpr(signedIf, channel, family) !== ghExpr(unsignedIf, channel, family), `${channel}/${family} is packaged by ${ghExpr(signedIf, channel, family) ? 'both' : 'neither'} packaging step(s)`)
+  }
+}
+// A signed mac leg on the mac-signed channel is VERIFIED: codesign + stapler run whenever a channel signs macOS.
+assert(/Verify macOS signature and notarization ticket\n\s+if: inputs\.channel != 'internal-unsigned' && matrix\.family == 'macos'/.test(candidate), 'every channel that signs macOS verifies the trust chain')
+assert(/if: inputs\.channel == 'mac-signed-beta'[\s\S]*?macos-arm64', 'macos-x64'/.test(promotion), 'promoting a mac-signed beta enforces the macOS signing boundary')
+
 const sourceSha = '0123456789abcdef0123456789abcdef01234567'
 const assets = {
   'windows-x64': 'clarity-aui-1.2.3-x64.exe',
@@ -35,7 +90,7 @@ const assets = {
   'linux-arm64': 'clarity-aui-1.2.3-arm64.AppImage'
 }
 
-for (const channel of ['internal-unsigned', 'public-beta']) {
+for (const channel of Object.keys(CHANNELS)) {
   const directory = mkdtempSync(join(tmpdir(), 'clarity-release-control-'))
   try {
     for (const [platform, name] of Object.entries(assets)) {
@@ -48,7 +103,7 @@ for (const channel of ['internal-unsigned', 'public-beta']) {
         channel,
         source_sha: sourceSha,
         verified: true,
-        signed: channel === 'public-beta' && !platform.startsWith('linux')
+        signed: signedFor(channel, platform.split('-')[0])
       }))
     }
     const manifest = join(directory, 'release-manifest.json')
@@ -78,13 +133,32 @@ for (const channel of ['internal-unsigned', 'public-beta']) {
         const sha256 = createHash('sha256').update(readFileSync(join(wrongArch, renamed))).digest('hex')
         writeFileSync(join(wrongArch, `SHA256SUMS-${platform}.txt`), `${sha256}  ${renamed}
 `)
-        writeFileSync(join(wrongArch, `verification-${platform}.json`), JSON.stringify({ schema: 1, platform, channel, source_sha: sourceSha, verified: true, signed: channel === 'public-beta' && !platform.startsWith('linux') }))
+        writeFileSync(join(wrongArch, `verification-${platform}.json`), JSON.stringify({ schema: 1, platform, channel, source_sha: sourceSha, verified: true, signed: signedFor(channel, platform.split('-')[0]) }))
       }
       const archRejected = spawnSync(process.execPath, [join(root, 'scripts', 'assemble-manifest.mjs'), wrongArch, 'v1.2.3', sourceSha, channel, join(wrongArch, 'm.json')]).status !== 0
       assert(archRejected, `an arm64 leg whose installer is named x64 was assembled for ${channel}`)
     } finally {
       rmSync(wrongArch, { recursive: true, force: true })
     }
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+}
+
+// A leg that CLAIMS a signature its channel does not grant is refused — the mac-signed beta must not pass off an
+// unsigned Windows installer as signed, and must not pass off an unsigned mac one either.
+for (const [channel, liar] of [['mac-signed-beta', 'windows-x64'], ['mac-signed-beta', 'macos-arm64'], ['internal-unsigned', 'macos-x64']]) {
+  const directory = mkdtempSync(join(tmpdir(), 'clarity-release-claim-'))
+  try {
+    for (const [platform, name] of Object.entries(assets)) {
+      writeFileSync(join(directory, name), `fixture-${channel}-${platform}`)
+      const sha256 = createHash('sha256').update(readFileSync(join(directory, name))).digest('hex')
+      writeFileSync(join(directory, `SHA256SUMS-${platform}.txt`), `${sha256}  ${name}\n`)
+      const honest = signedFor(channel, platform.split('-')[0])
+      writeFileSync(join(directory, `verification-${platform}.json`), JSON.stringify({ schema: 1, platform, channel, source_sha: sourceSha, verified: true, signed: platform === liar ? !honest : honest }))
+    }
+    const refused = spawnSync(process.execPath, [join(root, 'scripts', 'assemble-manifest.mjs'), directory, 'v1.2.3', sourceSha, channel, join(directory, 'm.json')]).status !== 0
+    assert(refused, `a ${channel} leg (${liar}) with a false signing claim was assembled`)
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }
