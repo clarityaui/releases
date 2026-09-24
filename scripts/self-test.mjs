@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { CHANNELS, signedFor } from './channels.mjs'
@@ -18,9 +18,110 @@ function assert(condition, message) {
   if (!condition) throw new Error(message)
 }
 
-for (const workflow of [candidate, promotion, checks]) {
-  assert(!/uses:\s+[^\s#]+@(main|master|v\d+)\b/.test(workflow), 'every external action must be pinned to a commit')
+/**
+ * ⚠⚠ DERIVED FROM THE DIRECTORY, NEVER HAND-WRITTEN. This loop used to read `[candidate, promotion, checks]`,
+ *    so the moment a fourth workflow was added (source-checks.yml, 2026-09-21) it would have been the one file
+ *    whose actions nobody checked were pinned — the list and its source silently disagreeing, which is the
+ *    defect this rule exists for. Adding a workflow now adds its coverage.
+ */
+const workflowDir = join(root, '.github', 'workflows')
+const workflowFiles = readdirSync(workflowDir).filter((name) => name.endsWith('.yml'))
+assert(workflowFiles.length >= 4, `expected the controller's workflows, found ${workflowFiles.join(', ') || 'none'}`)
+for (const name of workflowFiles) {
+  const workflow = readFileSync(join(workflowDir, name), 'utf8')
+  assert(!/uses:\s+[^\s#]+@(main|master|v\d+)\b/.test(workflow), `every external action must be pinned to a commit (${name})`)
 }
+
+/**
+ * ⚠⚠⚠ THE CHEAP SUITE MUST STAY CHEAP IN AUTHORITY, NOT JUST IN MINUTES. source-checks runs the private source
+ *     on public runners so the six platforms cost nothing; that is only safe while it cannot publish. It builds
+ *     no installer and creates no release, so it has no business holding write permission or a token.
+ */
+const sourceChecks = readFileSync(join(workflowDir, 'source-checks.yml'), 'utf8')
+assert(!/contents:\s*write/.test(sourceChecks), 'source-checks must not hold write permission')
+assert(!/GH_TOKEN|gh release/.test(sourceChecks), 'source-checks must not be able to publish a release')
+assert(!/CSC_LINK|APPLE_API_KEY|CSC_KEY_PASSWORD/.test(sourceChecks), 'source-checks must not reach the signing secrets')
+
+/**
+ * ⚠⚠⚠ SOME WORKFLOW KEYS ARE EVALUATED BEFORE A JOB'S MATRIX EXISTS, AND GITHUB REFUSES THE WHOLE FILE IF THEY READ
+ *     IT. A job's `if:` and `strategy:` may read only github, needs, vars and inputs; the workflow's `concurrency:`
+ *     and `run-name:` only github, inputs and vars. source-checks.yml's first cut narrowed its legs with
+ *     `matrix.family` in the job `if:`, and no leg ever ran: a push showed one failed run named after the file's
+ *     path, and every check here was green because none of them read an expression's contexts. Now every workflow's
+ *     restricted expressions are read, and the count is printed so a reader that finds nothing cannot pass.
+ */
+const ALLOWED = {
+  'job if': new Set(['github', 'needs', 'vars', 'inputs']),
+  'job strategy': new Set(['github', 'needs', 'vars', 'inputs']),
+  'workflow concurrency': new Set(['github', 'inputs', 'vars']),
+  'workflow run-name': new Set(['github', 'inputs', 'vars'])
+}
+const contextsIn = (expr) =>
+  [...expr.replace(/'[^']*'/g, "''").matchAll(/(?<![\w.-])([A-Za-z_][\w-]*)\s*\./g)].map((m) => m[1])
+const bracesOf = (line) => [...line.matchAll(/\$\{\{([\s\S]*?)\}\}/g)].map((m) => m[1])
+function restrictedExpressions(text) {
+  const out = []
+  let top = null
+  let job = null
+  let jobKey = null
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\s*#/.test(line) || !line.trim()) continue
+    const t = /^([\w-]+):\s*(.*)$/.exec(line)
+    if (t) {
+      top = t[1]
+      job = null
+      jobKey = null
+      if (top === 'run-name') out.push({ where: 'workflow run-name', of: 'the workflow', expr: t[2] })
+      if (top === 'concurrency') for (const e of bracesOf(t[2])) out.push({ where: 'workflow concurrency', of: 'the workflow', expr: e })
+      continue
+    }
+    if (top === 'concurrency') {
+      for (const e of bracesOf(line)) out.push({ where: 'workflow concurrency', of: 'the workflow', expr: e })
+      continue
+    }
+    if (top !== 'jobs') continue
+    const j = /^  ([\w-]+):\s*$/.exec(line)
+    if (j) {
+      job = j[1]
+      jobKey = null
+      continue
+    }
+    const k = /^    ([\w-]+):\s*(.*)$/.exec(line)
+    if (k) {
+      jobKey = k[1]
+      if (jobKey === 'if') out.push({ where: 'job if', of: `job ${job}`, expr: k[2] })
+      if (jobKey === 'strategy') for (const e of bracesOf(k[2])) out.push({ where: 'job strategy', of: `job ${job}`, expr: e })
+      continue
+    }
+    if (jobKey === 'strategy') for (const e of bracesOf(line)) out.push({ where: 'job strategy', of: `job ${job}`, expr: e })
+  }
+  return out
+}
+const restrictedRead = []
+for (const name of workflowFiles) {
+  for (const { where, of, expr } of restrictedExpressions(readFileSync(join(workflowDir, name), 'utf8'))) {
+    restrictedRead.push(`${name} · ${of} · ${where.split(' ')[1]}: ${expr.trim()}`)
+    assert(!/^[>|]/.test(expr.trim()), `${name}: ${of} writes its ${where.split(' ')[1]} as a block scalar; keep it on one line so its contexts can be read`)
+    const body = expr.trim().replace(/^\$\{\{/, '').replace(/\}\}$/, '')
+    const bad = [...new Set(contextsIn(body))].filter((c) => !ALLOWED[where].has(c))
+    assert(bad.length === 0, `${name}: ${of}'s ${where.split(' ')[1]} reads ${bad.join(', ')}, which GitHub does not allow there (only ${[...ALLOWED[where]].join(', ')}), so it refuses the whole file`)
+  }
+}
+assert(restrictedRead.length > 0, 'the restricted-expression reader found nothing in any workflow; it is reading nothing')
+
+/**
+ * ⚠⚠ THE PLATFORMS CHECKED ARE THE PLATFORMS SHIPPED. source-checks keeps its own copy of the six legs (it has to:
+ *    its matrix is chosen at run time), so the copy is compared with candidate.yml's matrix, os + label + family.
+ */
+const shippedLegs = [...candidate.matchAll(/- os: (\S+)\r?\n\s+label: (\S+)\r?\n\s+family: (\S+)/g)].map((m) => `${m[1]} ${m[2]} ${m[3]}`).sort()
+const checkedJson = /all='(\[[\s\S]*?\])'/.exec(sourceChecks)
+assert(checkedJson, 'source-checks states its legs as one JSON list')
+const checkedLegs = JSON.parse(checkedJson[1]).map((l) => `${l.os} ${l.label} ${l.family}`).sort()
+assert(shippedLegs.length === 6, `candidate.yml ships ${shippedLegs.length} legs as read here; expected the six`)
+assert(JSON.stringify(checkedLegs) === JSON.stringify(shippedLegs), `the legs source-checks runs differ from the legs candidate.yml ships: checked [${checkedLegs.join('; ')}], shipped [${shippedLegs.join('; ')}]`)
+console.log(`restricted expressions read (${restrictedRead.length}, across ${workflowFiles.length} workflows):`)
+for (const r of restrictedRead) console.log(`  ${r}`)
+console.log(`legs checked = legs shipped: ${checkedLegs.length}`)
 assert(/SOURCE_REPO_TOKEN/.test(candidate) && /compare\/\$\{\{ inputs\.source_sha \}\}\.\.\.main/.test(candidate), 'candidate must verify private-source ancestry')
 assert(/persisting credentials/.test(candidate) && /source\/package-lock\.json/.test(candidate), 'source must be fetched before source-controlled commands execute')
 assert(!/GH_RELEASE_TOKEN|CLOUDFLARE_API_TOKEN/.test(candidate + promotion), 'controller must use no long-lived publishing or Cloudflare token')
