@@ -313,6 +313,8 @@ jobs:
           merge-multiple: true
       - name: Rebuild the canonical update feeds from the per-leg ones
         run: node scripts/merge-update-feeds.mjs staged
+      - name: Check the update feeds against the installers and checksum them
+        run: node scripts/feed-checksums.mjs write staged
       - name: Assemble and independently validate manifest
         run: |
           node scripts/assemble-manifest.mjs staged "${{ inputs.tag }}" "${{ inputs.source_sha }}" "${{ inputs.channel }}" staged/release-manifest.json

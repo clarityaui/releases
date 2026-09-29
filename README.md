@@ -69,3 +69,12 @@ on that rather than on the extension, because two legs share every extension. `p
 requires every Windows and macOS leg to be signed; Linux legs are never signed. The two macOS
 legs bill at the macOS rate, so the matrix does not fail fast: one red leg does not cancel the
 other five and cost a second attempt to learn what they would have said.
+
+## Update feeds
+
+electron-updater reads four feeds: `latest.yml` (Windows), `latest-mac.yml`, `latest-linux.yml` and
+`latest-linux-arm64.yml`. Each leg writes its own feed; the draft job merges them into those four
+(`scripts/merge-update-feeds.mjs`), then `scripts/feed-checksums.mjs write` checks every feed entry's
+size and sha512 against the file it names and records the four feeds' SHA-256 in
+`SHA256SUMS-update-feeds.txt`. Promotion runs `feed-checksums.mjs verify` on the downloaded draft and
+refuses a feed that no longer matches its record or its files.

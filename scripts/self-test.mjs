@@ -311,4 +311,66 @@ try {
   rmSync(halfFeed, { recursive: true, force: true })
 }
 
-console.log('PASS: controller workflow boundary, manifest tamper rejection and update-feed arch coverage verified')
+/**
+ * ⚠⚠ THE PUBLISHED FEEDS CARRY A CHECKSUM, AND EACH DESCRIBES THE FILES IT SHIPS. The four canonical feeds were the
+ *    only release files no record covered: each leg checksums its per-leg feed, and the merge above deletes those. The
+ *    draft job now writes SHA256SUMS-update-feeds.txt after the merge and promotion verifies it; both check every feed
+ *    entry's size and sha512 against the file it names. Pinned here: where the two steps run, the round trip, and each
+ *    refusal BY ITS OWN MESSAGE, so a refusal for some other reason cannot pass for this one.
+ */
+const draftJob = candidate.slice(candidate.indexOf('\n  draft:'))
+const mergeAt = draftJob.indexOf('scripts/merge-update-feeds.mjs staged')
+const feedSumsAt = draftJob.indexOf('scripts/feed-checksums.mjs write staged')
+const assembleAt = draftJob.indexOf('scripts/assemble-manifest.mjs staged')
+assert(mergeAt > 0 && feedSumsAt > mergeAt && assembleAt > feedSumsAt, 'the draft job must checksum the feeds after merging them and before assembling the release')
+const verifyFeedsAt = promotion.indexOf('scripts/feed-checksums.mjs verify candidate')
+assert(verifyFeedsAt > 0 && verifyFeedsAt < promotion.indexOf('gh release edit'), 'promotion must verify the feeds before it publishes')
+
+const feedSums = (mode, directory) =>
+  spawnSync(process.execPath, [join(root, 'scripts', 'feed-checksums.mjs'), mode, directory], { encoding: 'utf8' })
+const refusedWith = (result, phrase) => result.status !== 0 && result.stderr.includes(phrase)
+const sealed = mkdtempSync(join(tmpdir(), 'clarity-release-feedsums-'))
+try {
+  for (const [leg, url] of Object.entries(legFeeds)) {
+    writeFileSync(join(sealed, url), `installer-${leg}`)
+    const sha512 = createHash('sha512').update(`installer-${leg}`).digest('base64')
+    const size = Buffer.byteLength(`installer-${leg}`)
+    writeFileSync(join(sealed, `latest-${leg}.yml`), `version: 1.2.3\nfiles:\n  - url: ${url}\n    sha512: ${sha512}\n    size: ${size}\npath: ${url}\nsha512: ${sha512}\nreleaseDate: '2026-09-21T00:00:00.000Z'\n`)
+  }
+  assert(mergeIn(sealed).status === 0, 'the six per-leg feeds must merge before they are checksummed')
+  const written = feedSums('write', sealed)
+  assert(written.status === 0, `the merged feeds must checksum: ${written.stderr}`)
+  const record = readFileSync(join(sealed, 'SHA256SUMS-update-feeds.txt'), 'utf8').trim().split('\n').map((l) => l.split(/\s+/)[1]).sort()
+  assert(record.join() === ['latest-linux-arm64.yml', 'latest-linux.yml', 'latest-mac.yml', 'latest.yml'].join(), `the record must cover the four canonical feeds, found ${record.join(', ')}`)
+  assert(feedSums('verify', sealed).status === 0, 'an untouched release must verify')
+  assert(refusedWith(feedSums('write', sealed), 'refusing to overwrite'), 'a second write must not replace the record')
+
+  const installer = join(sealed, legFeeds['macos-x64'])
+  const original = readFileSync(installer, 'utf8')
+  writeFileSync(installer, original.replace(/.$/, (c) => (c === 'x' ? 'y' : 'x')))
+  assert(refusedWith(feedSums('verify', sealed), 'sha512 it gives'), 'an installer that no longer matches its feed (same size) must be refused')
+  writeFileSync(installer, original)
+
+  const feedPath = join(sealed, 'latest.yml')
+  const feedText = readFileSync(feedPath, 'utf8')
+  writeFileSync(feedPath, `${feedText}\n`)
+  assert(refusedWith(feedSums('verify', sealed), 'does not match its recorded checksum'), 'a feed edited after the draft must be refused')
+  writeFileSync(feedPath, feedText)
+
+  rmSync(join(sealed, legFeeds['linux-arm64']))
+  assert(refusedWith(feedSums('verify', sealed), 'not in this release'), 'a feed naming a file the release lacks must be refused')
+  writeFileSync(join(sealed, legFeeds['linux-arm64']), 'installer-linux-arm64')
+
+  const sums = readFileSync(join(sealed, 'SHA256SUMS-update-feeds.txt'), 'utf8')
+  rmSync(join(sealed, 'SHA256SUMS-update-feeds.txt'))
+  assert(refusedWith(feedSums('verify', sealed), 'is missing'), 'a release with no feed record must be refused')
+  writeFileSync(join(sealed, 'latest-windows-x64.yml'), feedText)
+  assert(refusedWith(feedSums('write', sealed), 'per-leg feeds are still here'), 'a write before the merge finished must be refused')
+  rmSync(join(sealed, 'latest-windows-x64.yml'))
+  writeFileSync(join(sealed, 'SHA256SUMS-update-feeds.txt'), sums)
+  assert(feedSums('verify', sealed).status === 0, 'the restored release must verify again (each refusal above was the bend, not the fixture)')
+} finally {
+  rmSync(sealed, { recursive: true, force: true })
+}
+
+console.log('PASS: controller workflow boundary, manifest tamper rejection, update-feed arch coverage and feed checksums verified')
