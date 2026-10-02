@@ -74,6 +74,8 @@ jobs:
           gh release download "${{ inputs.tag }}" --dir candidate
       - name: Validate every published claim and checksum
         run: node scripts/validate-manifest.mjs candidate/release-manifest.json candidate "${{ inputs.tag }}" "${{ inputs.source_sha }}" "${{ inputs.channel }}"
+      - name: Validate the update feeds against the installers and their checksum
+        run: node scripts/feed-checksums.mjs verify candidate
       - name: Enforce public signing boundary
         if: inputs.channel == 'public-beta'
         shell: bash
