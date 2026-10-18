@@ -157,6 +157,12 @@ jobs:
         env:
           ELECTRON_DISABLE_SANDBOX: '1'
         run: npm run test:hud
+      # The Linux command sandbox (clarityaui/main docs/COMMAND-SANDBOX-DESIGN.md §4) runs commands under bubblewrap.
+      # Installed here (a no-op if the image has it) so a suite that drives the real launcher measures it instead of
+      # reporting bubblewrap missing; the version goes into the log as the evidence of which one ran.
+      - name: Install bubblewrap (the Linux command sandbox's launcher)
+        if: matrix.family == 'linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap && bwrap --version
       - name: Full guard suite
         working-directory: source
         shell: bash
