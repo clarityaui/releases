@@ -157,6 +157,9 @@ jobs:
         env:
           ELECTRON_DISABLE_SANDBOX: '1'
         run: npm run test:hud
+      - name: Install bubblewrap (the Linux command sandbox's launcher)
+        if: matrix.family == 'linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap && bwrap --version
       - name: Full guard suite
         working-directory: source
         shell: bash
