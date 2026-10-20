@@ -160,6 +160,13 @@ jobs:
       - name: Install bubblewrap (the Linux command sandbox's launcher)
         if: matrix.family == 'linux'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap && bwrap --version
+      - name: Allow bubblewrap its user namespaces (Ubuntu 24.04 restricts them)
+        if: matrix.family == 'linux'
+        run: |
+          if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = "1" ]; then
+            printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' 'profile bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '}' | sudo tee /etc/apparmor.d/bwrap
+            sudo apparmor_parser -r /etc/apparmor.d/bwrap
+          fi
       - name: Full guard suite
         working-directory: source
         shell: bash
