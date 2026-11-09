@@ -223,7 +223,24 @@ jobs:
           app_path=$(find dist -maxdepth 3 -name '*.app' -print -quit)
           test -n "$app_path"
           codesign --verify --deep --strict --verbose=2 "$app_path"
-          xcrun stapler validate "$app_path"
+          # The ticket check asks Apple's CloudKit, and a dropped connection there failed candidates 3 and 4 of beta.8 on
+          # one macOS leg each, with the app signed and notarized. Only a lost or timed-out connection is asked again;
+          # a ticket that is missing or invalid fails on the first answer.
+          for attempt in 1 2 3 4 5; do
+            if out=$(xcrun stapler validate "$app_path" 2>&1); then
+              echo "$out"
+              exit 0
+            fi
+            echo "$out"
+            if ! grep -qE 'NSURLErrorDomain|network connection was lost|timed out' <<<"$out"; then
+              echo "::error::stapler validate refused the ticket"
+              exit 1
+            fi
+            echo "::warning::stapler validate could not reach Apple (attempt $attempt of 5)"
+            if [ "$attempt" -lt 5 ]; then sleep $((attempt * 20)); fi
+          done
+          echo "::error::stapler validate could not reach Apple in 5 attempts"
+          exit 1
       - name: Installed upgrade smoke
         if: inputs.channel == 'public-beta' && matrix.family == 'windows'
         working-directory: source
