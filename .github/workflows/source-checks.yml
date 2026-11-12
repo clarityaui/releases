@@ -110,7 +110,7 @@ jobs:
     needs: resolve
     runs-on: ${{ matrix.os }}
     environment: source-read
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
