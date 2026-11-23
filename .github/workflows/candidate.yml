@@ -275,6 +275,15 @@ jobs:
           if (-not $assets) { throw 'No release assets were generated' }
           $assets | ForEach-Object { "$(Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName | Select-Object -ExpandProperty Hash)  $($_.Name)" } |
             Set-Content -Encoding ascii "dist/SHA256SUMS-$env:RELEASE_PLATFORM.txt"
+          # The update key this source pins (src/shared/updateKey.ts), carried in the record so the draft job can refuse
+          # to sign with any other: a release signed with the wrong key would cut every installed copy off from updates.
+          # A source from before the key existed has no such file, and pins nothing.
+          $pinned = ''
+          if (Test-Path -LiteralPath 'src/shared/updateKey.ts') {
+            $line = [regex]::Match((Get-Content -Raw -LiteralPath 'src/shared/updateKey.ts'), "(?m)^export const UPDATE_PUBLIC_KEY = '([A-Za-z0-9+/=]*)'\r?$")
+            if (-not $line.Success) { throw 'src/shared/updateKey.ts has no UPDATE_PUBLIC_KEY line in the expected shape' }
+            $pinned = $line.Groups[1].Value
+          }
           # The same rule as scripts/channels.mjs — the self-test holds the two together.
           $signed = ($env:RELEASE_CHANNEL -eq 'public-beta' -and $env:RELEASE_FAMILY -in @('windows','macos')) -or ($env:RELEASE_CHANNEL -eq 'mac-signed-beta' -and $env:RELEASE_FAMILY -eq 'macos')
           @{
@@ -284,6 +293,7 @@ jobs:
             source_sha = $env:RELEASE_SHA.ToLowerInvariant()
             verified = $true
             signed = $signed
+            update_key = $pinned
           } | ConvertTo-Json | Set-Content -Encoding utf8 "dist/verification-$env:RELEASE_PLATFORM.json"
       - name: Remove temporary Apple key
         if: always() && matrix.family == 'macos'
@@ -332,6 +342,13 @@ jobs:
         run: node scripts/merge-update-feeds.mjs staged
       - name: Check the update feeds against the installers and checksum them
         run: node scripts/feed-checksums.mjs write staged
+      # ⚠ The update key is read HERE and nowhere else: this job runs only the controller's own scripts. The build
+      #   legs run the source's code and must never be handed it.
+      - name: Sign every update file with Clarity's update key
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          UPDATE_PUBLIC_KEY: ${{ vars.UPDATE_PUBLIC_KEY }}
+        run: node scripts/sign-updates.mjs sign staged
       - name: Assemble and independently validate manifest
         run: |
           node scripts/assemble-manifest.mjs staged "${{ inputs.tag }}" "${{ inputs.source_sha }}" "${{ inputs.channel }}" staged/release-manifest.json

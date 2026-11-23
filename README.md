@@ -78,3 +78,24 @@ electron-updater reads four feeds: `latest.yml` (Windows), `latest-mac.yml`, `la
 size and sha512 against the file it names and records the four feeds' SHA-256 in
 `SHA256SUMS-update-feeds.txt`. Promotion runs `feed-checksums.mjs verify` on the downloaded draft and
 refuses a feed that no longer matches its record or its files.
+
+## Update signatures
+
+Every file a feed names is signed with Clarity's update key, and the app refuses an update without that
+signature. The draft job runs `scripts/sign-updates.mjs sign` after the feeds are checksummed; it writes
+`<file>.sig` beside each file and `update-key.pub` (the public half). Promotion runs `sign-updates.mjs verify`
+before it publishes.
+
+What is signed is one line per file: `clarity-update-v1`, the version, the file name and the file's sha512. The
+version and name are in it so an old signed installer cannot be served as a newer release.
+
+- The private key is the secret `UPDATE_SIGNING_KEY`. Only the draft job reads it, and that job runs only this
+  repository's scripts: a build leg runs the source's code and is never handed it.
+- The public half is the variable `UPDATE_PUBLIC_KEY`, and the source pins the same value. Each leg's
+  verification record carries the key its source pins, and signing with any other key is refused: every installed
+  copy would reject that release's successors.
+- Before the key is made, neither side names one and a release goes out unsigned and says so. Once either side
+  names a key, an unsigned release is refused in both steps.
+
+The source repository checks the same fixed test vector as `scripts/self-test.mjs` here, so the two cannot drift
+apart on the signed text.

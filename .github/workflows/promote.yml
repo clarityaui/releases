@@ -76,6 +76,10 @@ jobs:
         run: node scripts/validate-manifest.mjs candidate/release-manifest.json candidate "${{ inputs.tag }}" "${{ inputs.source_sha }}" "${{ inputs.channel }}"
       - name: Validate the update feeds against the installers and their checksum
         run: node scripts/feed-checksums.mjs verify candidate
+      - name: Verify every update file's signature
+        env:
+          UPDATE_PUBLIC_KEY: ${{ vars.UPDATE_PUBLIC_KEY }}
+        run: node scripts/sign-updates.mjs verify candidate
       - name: Enforce public signing boundary
         if: inputs.channel == 'public-beta'
         shell: bash
