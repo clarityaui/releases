@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, createPrivateKey, generateKeyPairSync } from 'node:crypto'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -373,4 +373,131 @@ try {
   rmSync(sealed, { recursive: true, force: true })
 }
 
-console.log('PASS: controller workflow boundary, manifest tamper rejection, update-feed arch coverage and feed checksums verified')
+/**
+ * ⚠⚠ EVERY UPDATE FILE IS SIGNED WITH CLARITY'S OWN KEY, AND PROMOTION CHECKS EACH ONE BACK. A Windows or AppImage update
+ *    used to be trusted because GitHub served it; the app now refuses an installer without the signature this
+ *    repository makes (scripts/sign-updates.mjs). Pinned here: where the key is read (the draft job, never a build
+ *    leg), where both steps run, one fixed vector the source checks too, the round trip, and each refusal BY ITS OWN
+ *    MESSAGE.
+ */
+const { signOne, verifyOne, signedText, publicKeyOf } = await import('./sign-updates.mjs')
+const signAt = draftJob.indexOf('scripts/sign-updates.mjs sign staged')
+assert(signAt > feedSumsAt && signAt < draftJob.indexOf('gh release create'), 'the draft job must sign the update files after the feeds are checked and before the release is created')
+assert(candidate.split('secrets.UPDATE_SIGNING_KEY').length === 2 && candidate.indexOf('secrets.UPDATE_SIGNING_KEY') > candidate.indexOf('\n  draft:'), 'the update key is read once, in the draft job, and never by a build leg')
+for (const name of workflowFiles.filter((n) => n !== 'candidate.yml')) {
+  assert(!readFileSync(join(workflowDir, name), 'utf8').includes('UPDATE_SIGNING_KEY'), `only candidate.yml may read the update key (${name})`)
+}
+assert(candidate.includes('update_key = $pinned') && candidate.includes("src/shared/updateKey.ts"), "each leg's record must carry the update key its source pins")
+const verifySigsAt = promotion.indexOf('scripts/sign-updates.mjs verify candidate')
+assert(verifySigsAt > verifyFeedsAt && verifySigsAt < promotion.indexOf('gh release edit'), 'promotion must verify the signatures after the feeds and before it publishes')
+
+// The vector: the source's scripts/updatesig-test.ts holds the same six values. Ed25519 is deterministic, so signing
+// with the published TEST seed (the bytes 0..31; it signs nothing real) must give this signature exactly.
+const VECTOR = {
+  seedHex: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',
+  publicKey: 'A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=',
+  version: '0.1.0-beta.9',
+  name: 'clarity-aui-0.1.0-beta.9-x64.exe',
+  sha512: 'cm42NlfnWHsy4mbVZ5BflgPeB6r+JkqK0FRktjYg1TAtlk5qwgEnkPIB5/Lom283/yNERKICGrBmbxFreMeGeQ==',
+  signature: 'OMBkW5SMZurEgL+lAby3bmsYvoPQC3EWZbvGDsZKKSCkOQv+cKuVfER+dxPMSJBD3BUWAai3oH503vg9MYxGCQ=='
+}
+const vectorKey = createPrivateKey({ key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.from(VECTOR.seedHex, 'hex')]), format: 'der', type: 'pkcs8' })
+assert(publicKeyOf(vectorKey) === VECTOR.publicKey, 'the vector key must derive the vector public key')
+assert(signOne(vectorKey, VECTOR.version, VECTOR.name, VECTOR.sha512) === VECTOR.signature, 'this controller must sign the shared vector exactly as the source expects')
+assert(verifyOne(VECTOR.publicKey, VECTOR.version, VECTOR.name, VECTOR.sha512, VECTOR.signature), 'the shared vector must verify')
+assert(!verifyOne(VECTOR.publicKey, '0.1.0-beta.10', VECTOR.name, VECTOR.sha512, VECTOR.signature), 'the vector under another version was accepted')
+assert(signedText('1.2.3', 'a.exe', 'h') === 'clarity-update-v1\n1.2.3\na.exe\nh\n', 'the signed text changed shape')
+
+const signUpdates = (mode, directory, env = {}) =>
+  spawnSync(process.execPath, [join(root, 'scripts', 'sign-updates.mjs'), mode, directory], { encoding: 'utf8', env: { ...process.env, UPDATE_SIGNING_KEY: '', UPDATE_PUBLIC_KEY: '', ...env } })
+const stageRelease = (pinnedKeyOf = () => undefined) => {
+  const directory = mkdtempSync(join(tmpdir(), 'clarity-release-sigs-'))
+  for (const [leg, url] of Object.entries(legFeeds)) {
+    writeFileSync(join(directory, url), `installer-${leg}`)
+    const sha512 = createHash('sha512').update(`installer-${leg}`).digest('base64')
+    writeFileSync(join(directory, `latest-${leg}.yml`), `version: 1.2.3\nfiles:\n  - url: ${url}\n    sha512: ${sha512}\n    size: ${Buffer.byteLength(`installer-${leg}`)}\npath: ${url}\nsha512: ${sha512}\nreleaseDate: '2026-09-21T00:00:00.000Z'\n`)
+    const record = { schema: 1, platform: leg, verified: true }
+    if (pinnedKeyOf(leg) !== undefined) record.update_key = pinnedKeyOf(leg)
+    writeFileSync(join(directory, `verification-${leg}.json`), JSON.stringify(record))
+  }
+  assert(mergeIn(directory).status === 0, 'the staged release must merge its feeds')
+  return directory
+}
+const releaseKey = generateKeyPairSync('ed25519').privateKey
+const releasePem = releaseKey.export({ format: 'pem', type: 'pkcs8' })
+const releasePub = publicKeyOf(releaseKey)
+const otherPub = publicKeyOf(generateKeyPairSync('ed25519').privateKey)
+const sigCount = (directory) => readdirSync(directory).filter((n) => n.endsWith('.sig')).length
+
+// Before the key exists: nothing pins one, nothing is signed, and both steps say so and pass.
+const keyless = stageRelease()
+try {
+  const signed = signUpdates('sign', keyless)
+  assert(signed.status === 0 && signed.stdout.includes('NOT SIGNED') && sigCount(keyless) === 0, `with no key anywhere a release goes out unsigned and says so: ${signed.stderr}`)
+  const verified = signUpdates('verify', keyless)
+  assert(verified.status === 0 && verified.stdout.includes('NOT SIGNED'), 'and promotion says so too')
+  assert(refusedWith(signUpdates('sign', keyless, { UPDATE_PUBLIC_KEY: releasePub }), 'this release must be signed with it'), 'once this controller names a key, an unsigned draft must be refused')
+  assert(refusedWith(signUpdates('verify', keyless, { UPDATE_PUBLIC_KEY: releasePub }), 'carries no update signatures, but a key exists'), 'and so must an unsigned promotion')
+} finally {
+  rmSync(keyless, { recursive: true, force: true })
+}
+
+// The source pins a key: the release must be signed, and with that key.
+const pinnedRelease = stageRelease(() => releasePub)
+try {
+  assert(refusedWith(signUpdates('sign', pinnedRelease), 'this release must be signed with it'), 'a source that pins a key must not ship unsigned')
+  const wrongKey = generateKeyPairSync('ed25519').privateKey.export({ format: 'pem', type: 'pkcs8' })
+  assert(refusedWith(signUpdates('sign', pinnedRelease, { UPDATE_SIGNING_KEY: wrongKey }), 'not the key in use'), 'signing with a key the source does not pin must be refused')
+  assert(sigCount(pinnedRelease) === 0, 'a refused signing must leave no signature behind')
+  assert(refusedWith(signUpdates('sign', pinnedRelease, { UPDATE_SIGNING_KEY: releasePem, UPDATE_PUBLIC_KEY: otherPub }), 'one of them is wrong'), 'a source and a controller that name different keys must stop everything')
+
+  const signed = signUpdates('sign', pinnedRelease, { UPDATE_SIGNING_KEY: releasePem, UPDATE_PUBLIC_KEY: releasePub })
+  assert(signed.status === 0, `the release must sign: ${signed.stderr}`)
+  assert(!signed.stdout.includes('BEGIN') && !signed.stderr.includes('BEGIN'), 'the private key must never be printed')
+  // Every file a feed names: six installers here (a real release also lists the macOS zips and they are signed too).
+  assert(sigCount(pinnedRelease) === Object.keys(legFeeds).length, `every feed-listed file must get a signature, found ${sigCount(pinnedRelease)}`)
+  assert(readFileSync(join(pinnedRelease, 'update-key.pub'), 'utf8').trim() === releasePub, 'the public key must be published beside the signatures')
+  assert(signUpdates('verify', pinnedRelease, { UPDATE_PUBLIC_KEY: releasePub }).status === 0, 'an untouched signed release must verify')
+  assert(refusedWith(signUpdates('sign', pinnedRelease, { UPDATE_SIGNING_KEY: releasePem }), 'already carries signatures'), 'a second signing must be refused')
+  assert(refusedWith(signUpdates('verify', pinnedRelease, { UPDATE_PUBLIC_KEY: otherPub }), 'one of them is wrong'), 'promotion under a controller that expects another key must be refused')
+
+  const installer = join(pinnedRelease, legFeeds['linux-x64'])
+  const original = readFileSync(installer, 'utf8')
+  writeFileSync(installer, original.replace(/.$/, (c) => (c === 'x' ? 'y' : 'x')))
+  assert(refusedWith(signUpdates('verify', pinnedRelease), 'its signature does not verify'), 'an installer changed after signing must be refused')
+  writeFileSync(installer, original)
+
+  // The replay: a genuine signature for the same bytes under an older version.
+  const sigPath = join(pinnedRelease, `${legFeeds['windows-x64']}.sig`)
+  const goodSig = readFileSync(sigPath, 'utf8')
+  const winHash = createHash('sha512').update('installer-windows-x64').digest('base64')
+  writeFileSync(sigPath, `${signOne(releaseKey, '1.2.2', legFeeds['windows-x64'], winHash)}\n`)
+  assert(refusedWith(signUpdates('verify', pinnedRelease), 'does not verify for version 1.2.3'), 'a signature made for another version must be refused')
+  writeFileSync(sigPath, goodSig)
+
+  rmSync(sigPath)
+  assert(refusedWith(signUpdates('verify', pinnedRelease), 'has no signature, though others'), 'a release with one signature missing must be refused')
+  writeFileSync(sigPath, goodSig)
+
+  writeFileSync(join(pinnedRelease, 'something-else.exe.sig'), goodSig)
+  assert(refusedWith(signUpdates('verify', pinnedRelease), 'signs a file no feed names'), 'a signature for a file no feed names must be refused')
+  rmSync(join(pinnedRelease, 'something-else.exe.sig'))
+
+  const pubPath = join(pinnedRelease, 'update-key.pub')
+  writeFileSync(pubPath, `${otherPub}\n`)
+  assert(refusedWith(signUpdates('verify', pinnedRelease), 'not the key in use'), 'a release claiming another public key than its source pins must be refused')
+  writeFileSync(pubPath, `${releasePub}\n`)
+  assert(signUpdates('verify', pinnedRelease).status === 0, 'the restored release must verify again (each refusal above was the bend, not the fixture)')
+} finally {
+  rmSync(pinnedRelease, { recursive: true, force: true })
+}
+
+// Legs that disagree about the pinned key are one commit built two ways: refuse.
+const split = stageRelease((leg) => (leg === 'linux-arm64' ? otherPub : releasePub))
+try {
+  assert(refusedWith(signUpdates('sign', split, { UPDATE_SIGNING_KEY: releasePem }), 'the legs disagree'), 'legs that pin different keys must be refused')
+} finally {
+  rmSync(split, { recursive: true, force: true })
+}
+
+console.log('PASS: controller workflow boundary, manifest tamper rejection, update-feed arch coverage, feed checksums and update signatures verified')
